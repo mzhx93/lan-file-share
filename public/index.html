@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>局域网文件共享 · 点对点</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator/qrcode.min.js"></script>
+<style>
+:root { --bg:#f4f6fb; --card:#fff; --accent:#2f6fed; --text:#1f2430; --muted:#6b7280; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+.wrap { max-width:560px; margin:0 auto; padding:24px 16px 48px; }
+h1 { font-size:22px; text-align:center; margin:8px 0 4px; }
+.sub { text-align:center; color:var(--muted); font-size:13px; margin:0 0 20px; }
+.card { background:var(--card); border-radius:14px; padding:20px; box-shadow:0 2px 12px rgba(20,40,90,.08); margin-bottom:16px; }
+.btn { display:block; width:100%; border:0; border-radius:10px; padding:13px; font-size:15px; background:var(--accent); color:#fff; cursor:pointer; margin:8px 0; }
+.btn.big { padding:22px; font-size:18px; margin:24px 0; }
+.btn.ghost { background:#eef2fb; color:var(--accent); }
+.btn:active { opacity:.85; }
+#status, #dl-status { text-align:center; color:var(--muted); font-size:13px; margin:10px 0; min-height:18px; }
+#qr-box { text-align:center; }
+#qr { display:inline-block; background:#fff; padding:10px; border:1px solid #e5e9f2; border-radius:10px; }
+#qr svg, #qr img { display:block; }
+.link-row { display:flex; gap:8px; margin:10px 0; }
+.link-row input { flex:1; padding:9px; border:1px solid #d7dce6; border-radius:8px; font-size:12px; }
+.link-row button { border:0; background:#eef2fb; color:var(--accent); border-radius:8px; padding:0 14px; cursor:pointer; }
+.hint { font-size:12px; color:var(--muted); line-height:1.7; }
+#file-list { list-style:none; padding:0; margin:0; }
+#file-list li { display:flex; align-items:center; gap:10px; padding:10px; border-bottom:1px solid #eef0f5; font-size:14px; }
+#file-list li .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#file-list li .size { color:var(--muted); font-size:12px; white-space:nowrap; }
+#file-list li .st { color:var(--muted); font-size:12px; white-space:nowrap; }
+#file-list a { color:var(--accent); text-decoration:none; font-size:13px; }
+.bar { height:6px; background:#e8ecf5; border-radius:3px; overflow:hidden; margin:8px 0; }
+.bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .3s; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="start-view">
+    <h1>局域网文件共享</h1>
+    <p class="sub">点对点直传 · 文件不离开局域网</p>
+    <button class="btn big" id="start-btn">开启局域网共享服务</button>
+    <p class="hint">点击后才启动共享；关闭本页即自动退出共享，文件不经过任何服务器。</p>
+  </div>
+
+  <div id="host-view" hidden>
+    <h1>局域网文件共享</h1>
+    <p class="sub">发送端</p>
+    <div class="card">
+      <button class="btn" id="pick-dir">📁 选择文件夹</button>
+      <button class="btn ghost" id="pick-file">📄 选择文件（可多选）</button>
+      <input type="file" id="file-input" multiple hidden>
+      <div id="status">请选择要共享的内容</div>
+      <div id="qr-box" hidden><div id="qr"></div></div>
+      <div class="link-row" id="link-box" hidden>
+        <input id="link" readonly>
+        <button id="copy-btn">复制</button>
+      </div>
+      <p class="hint">手机与电脑连接同一局域网后扫码即可下载；关闭本页即结束共享。</p>
+    </div>
+  </div>
+
+  <div id="guest-view" hidden>
+    <h1>接收文件</h1>
+    <p class="sub">点对点接收</p>
+    <div class="card">
+      <div id="dl-status">正在连接…</div>
+      <div class="bar"><i id="dl-bar"></i></div>
+      <ul id="file-list"></ul>
+    </div>
+  </div>
+
+</div>
+
+<script>
+
+const $ = (id) => document.getElementById(id);
+
+const params = new URLSearchParams(location.search);
+const roomId = params.get('room');
+
+function genId() {
+  if (crypto && crypto.randomUUID) {
+    return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  }
+  return Math.random().toString(36).slice(2, 14);
+}
+
+function wsUrl(room) {
+  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/room/' + room;
+}
+
+function prettyBytes(n) {
+  if (n == null || isNaN(n)) return '';
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + ' ' + u[i];
+}
+
+function renderQR(text) {
+  const box = $('qr');
+  box.innerHTML = '';
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    if (typeof qr.createSvgTag === 'function') {
+      box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2 });
+    } else {
+      const img = document.createElement('img');
+      img.src = qr.createDataURL(4, 2);
+      box.appendChild(img);
+    }
+  } catch (e) {
+    box.textContent = '二维码生成失败';
+  }
+}
+
+function setStatus(t) { $('status').textContent = t; }
+
+if (roomId) {
+  runGuest(roomId);
+} else {
+  runHost();
+}
+
+// ===== 发送端 =====
+function runHost() {
+  $('start-btn').onclick = () => {
+    $('start-view').hidden = true;
+    $('host-view').hidden = false;
+  };
+  const dirBtn = $('pick-dir');
+  const canPickDir = ('showDirectoryPicker' in window);
+  if (!canPickDir) dirBtn.textContent = '选择文件夹（此环境不支持，将用文件多选）';
+  dirBtn.onclick = async () => {
+    if (canPickDir) {
+      try {
+        const dir = await window.showDirectoryPicker();
+        const files = await readDir(dir);
+        if (!files.length) { setStatus('该文件夹为空'); return; }
+        startSharing(files, dir.name);
+        return;
+      } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    $('file-input').click();
+  };
+  $('pick-file').onclick = () => $('file-input').click();
+  $('file-input').onchange = () => {
+    const files = Array.from($('file-input').files || []);
+    if (files.length) startSharing(files, 'files');
+  };
+  $('copy-btn').onclick = () => {
+    const link = $('link');
+    link.select();
+    try { if (navigator.clipboard) navigator.clipboard.writeText(link.value); } catch (e) {}
+    setStatus('已复制链接');
+  };
+}
+
+async function readDir(dirHandle, prefix, out) {
+  prefix = prefix || '';
+  out = out || [];
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      const f = await entry.getFile();
+      out.push(new File([f], prefix + f.name, { type: f.type }));
+    } else if (entry.kind === 'directory') {
+      await readDir(entry, prefix + entry.name + '/', out);
+    }
+  }
+  return out;
+}
+
+function startSharing(files, name) {
+  const room = genId();
+  const url = location.origin + location.pathname + '?room=' + room;
+  $('link').value = url;
+  $('link-box').hidden = false;
+  $('qr-box').hidden = false;
+  renderQR(url);
+
+  const ws = new WebSocket(wsUrl(room));
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const dc = pc.createDataChannel('file', { ordered: true });
+  dc.binaryType = 'arraybuffer';
+  dc.bufferedAmountLowThreshold = 256 * 1024;
+
+  setStatus('等待手机扫码连接…');
+
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'join') {
+      setStatus('手机已连接，正在建立点对点通道…');
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+    } else if (msg.type === 'answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+    } else if (msg.type === 'ice') {
+      try { await pc.addIceCandidate(msg.candidate); } catch (e) {}
+    } else if (msg.type === 'peer-left') {
+      setStatus('对端已断开');
+    }
+  };
+  ws.onclose = () => { setStatus('信令连接已关闭，共享结束'); };
+  ws.onerror = () => { setStatus('信令连接出错'); };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate.toJSON() }));
+  };
+
+  dc.onopen = () => {
+    setStatus('通道已建立，正在发送文件…');
+    sendFiles(dc, files);
+  };
+
+  window.addEventListener('pagehide', () => {
+    try { dc.close(); } catch (e) {}
+    try { pc.close(); } catch (e) {}
+    try { ws.close(); } catch (e) {}
+  });
+}
+
+async function sendFiles(dc, files) {
+  dc.send(JSON.stringify({ type: 'meta', files: files.map((f) => ({ name: f.name, size: f.size })) }));
+  for (const f of files) {
+    await sendFile(dc, f);
+  }
+  dc.send(JSON.stringify({ type: 'done' }));
+  setStatus('发送完成 · ' + files.length + ' 个文件');
+}
+
+async function sendFile(dc, file) {
+  dc.send(JSON.stringify({ type: 'file-start', name: file.name, size: file.size }));
+  const reader = file.stream().getReader();
+  const CHUNK = 16 * 1024;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (let off = 0; off < value.byteLength; off += CHUNK) {
+      const end = Math.min(off + CHUNK, value.byteLength);
+      const buf = value.buffer.slice(value.byteOffset + off, value.byteOffset + end);
+      await waitLow(dc);
+      dc.send(buf);
+    }
+  }
+  dc.send(JSON.stringify({ type: 'file-end', name: file.name }));
+}
+
+function waitLow(dc) {
+  if (dc.bufferedAmount < dc.bufferedAmountLowThreshold) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onLow = () => { dc.removeEventListener('bufferedamountlow', onLow); resolve(); };
+    dc.addEventListener('bufferedamountlow', onLow);
+  });
+}
+
+// ===== 接收端 =====
+function runGuest(room) {
+  $('guest-view').hidden = false;
+  const ws = new WebSocket(wsUrl(room));
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  let dc = null;
+
+  $('dl-status').textContent = '正在连接主机…';
+
+  ws.onopen = () => { ws.send(JSON.stringify({ type: 'join' })); };
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'offer') {
+      await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription.sdp }));
+      $('dl-status').textContent = '已找到主机，正在建立点对点通道…';
+    } else if (msg.type === 'ice') {
+      try { await pc.addIceCandidate(msg.candidate); } catch (e) {}
+    } else if (msg.type === 'peer-left') {
+      $('dl-status').textContent = '分享已结束（主机已关闭）';
+      try { ws.close(); } catch (e) {}
+    }
+  };
+  ws.onclose = () => {
+    const t = $('dl-status').textContent;
+    if (t.indexOf('结束') < 0 && t.indexOf('完成') < 0) {
+      $('dl-status').textContent = '连接已断开';
+    }
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate.toJSON() }));
+  };
+  pc.ondatachannel = (e) => { dc = e.channel; setupReceive(dc); };
+}
+
+function setupReceive(dc) {
+  dc.binaryType = 'arraybuffer';
+  let current = null;
+  let totalSize = 0;
+  let totalReceived = 0;
+
+  dc.onopen = () => { $('dl-status').textContent = '通道已建立，等待文件列表…'; };
+  dc.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'meta') {
+        renderFileList(msg.files);
+        totalSize = msg.files.reduce((s, f) => s + f.size, 0);
+        $('dl-status').textContent = '正在接收 ' + msg.files.length + ' 个文件…';
+      } else if (msg.type === 'file-start') {
+        current = { name: msg.name, size: msg.size, chunks: [], received: 0 };
+      } else if (msg.type === 'file-end') {
+        if (current) finalizeFile(current);
+        current = null;
+      } else if (msg.type === 'done') {
+        $('dl-status').textContent = '全部接收完成';
+        $('dl-bar').style.width = '100%';
+      }
+    } else {
+      if (current) {
+        current.chunks.push(e.data);
+        current.received += e.data.byteLength;
+        totalReceived += e.data.byteLength;
+        updateFileProgress(current);
+      }
+      if (totalSize > 0) {
+        $('dl-bar').style.width = Math.round(totalReceived / totalSize * 100) + '%';
+      }
+    }
+  };
+}
+
+function renderFileList(files) {
+  const ul = $('file-list');
+  ul.innerHTML = '';
+  files.forEach((f) => {
+    const li = document.createElement('li');
+    li.dataset.name = f.name;
+    const nm = document.createElement('span');
+    nm.className = 'name';
+    nm.textContent = f.name;
+    const sz = document.createElement('span');
+    sz.className = 'size';
+    sz.textContent = prettyBytes(f.size);
+    const st = document.createElement('span');
+    st.className = 'st';
+    st.textContent = '等待';
+    li.appendChild(nm);
+    li.appendChild(sz);
+    li.appendChild(st);
+    ul.appendChild(li);
+  });
+}
+
+function updateFileProgress(f) {
+  const li = Array.from(document.querySelectorAll('#file-list li')).find((x) => x.dataset.name === f.name);
+  if (li) {
+    const st = li.querySelector('.st');
+    st.textContent = prettyBytes(f.received) + ' / ' + prettyBytes(f.size);
+  }
+}
+
+function finalizeFile(f) {
+  const blob = new Blob(f.chunks, { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const li = Array.from(document.querySelectorAll('#file-list li')).find((x) => x.dataset.name === f.name);
+  if (li) {
+    const st = li.querySelector('.st');
+    const a = document.createElement('a');
+    a.textContent = '保存';
+    a.href = url;
+    a.download = f.name;
+    st.replaceWith(a);
+  }
+}
+
+</script>
+</body>
+</html>

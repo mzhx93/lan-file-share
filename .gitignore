@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 其它
+*.log
+.DS_Store
+Thumbs.db
